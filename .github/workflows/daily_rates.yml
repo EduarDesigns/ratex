@@ -2,26 +2,23 @@ name: Update Exchange Rates
 
 on:
   schedule:
-    # Ejecutar todos los días a las 12:00 UTC (8:00 AM hora Venezuela)
     - cron: '0 12 * * *'
-  workflow_dispatch:   # Permite ejecutar manualmente desde GitHub
+  workflow_dispatch:
 
 jobs:
   scrape-and-update:
     runs-on: ubuntu-latest
-
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true  # Forzar Node 2
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
       - name: Install dependencies
         run: pip install -r requirements.txt
-
       - name: Run update script
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
