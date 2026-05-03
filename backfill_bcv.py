@@ -7,7 +7,7 @@ url: str = os.environ.get("SUPABASE_URL")
 key: str = os.environ.get("SUPABASE_KEY")
 supabase: Client = create_client(url, key)
 
-# Datos crudos obtenidos de la API (los proporcionaste)
+# Datos crudos obtenidos de la API
 RAW_DATA = {
     "start_date": "2026-01-01",
     "end_date": "2026-05-03",
@@ -126,28 +126,64 @@ RAW_DATA = {
     ]
 }
 
+def get_existing_binance(dates):
+    """Recupera la tasa_binance de los registros ya existentes para las fechas dadas."""
+    if not dates:
+        return {}
+    min_date = min(dates)
+    max_date = max(dates)
+    print(f"Consultando registros existentes entre {min_date} y {max_date} para conservar tasa_binance...")
+    resp = supabase.table("exchange_rates") \
+        .select("date, tasa_binance") \
+        .gte("date", min_date) \
+        .lte("date", max_date) \
+        .execute()
+    existing = {}
+    if resp.data:
+        for row in resp.data:
+            if row["tasa_binance"] is not None:
+                existing[row["date"]] = row["tasa_binance"]
+    print(f"Se encontraron {len(existing)} registros con tasa_binance ya guardada.")
+    return existing
+
 def save_historical_rates():
-    rows = []
+    # 1. Extraer todas las fechas y tasas del JSON
+    rows_bcv = []
     for r in RAW_DATA["rates"]:
-        rows.append({
+        rows_bcv.append({
             "date": r["date"],
-            "tasa_bcv": r["dollar"],
-            "tasa_binance": None,
-            "updated_at": "now()"
+            "tasa_bcv": r["dollar"]
         })
 
-    print(f"Se prepararon {len(rows)} registros para insertar/actualizar...")
+    # 2. Consultar qué tasa_binance existe ya en Supabase
+    fechas = [r["date"] for r in rows_bcv]
+    existing_binance = get_existing_binance(fechas)
 
-    # Upsert en lote
+    # 3. Construir las filas para el upsert sin borrar datos existentes
+    rows_final = []
+    for r in rows_bcv:
+        row = {
+            "date": r["date"],
+            "tasa_bcv": r["tasa_bcv"],
+            "updated_at": "now()"
+        }
+        # Si ya existía tasa_binance, la mantenemos
+        if r["date"] in existing_binance:
+            row["tasa_binance"] = existing_binance[r["date"]]
+        # Si no existía, simplemente no incluimos la clave → queda NULL (o se conserva NULL)
+        rows_final.append(row)
+
+    print(f"Se prepararon {len(rows_final)} registros para upsert (respetando tasa_binance).")
+
     result = supabase.table("exchange_rates").upsert(
-        rows,
+        rows_final,
         on_conflict="date"
     ).execute()
 
     if hasattr(result, 'error') and result.error:
         print(f"Error al guardar: {result.error}")
     else:
-        print("✅ Backfill completado exitosamente.")
+        print("✅ Backfill BCV completado sin borrar tasa_binance.")
 
 if __name__ == "__main__":
     save_historical_rates()
