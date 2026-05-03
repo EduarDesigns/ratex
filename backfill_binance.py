@@ -1,6 +1,6 @@
 import os
 import requests
-from datetime import datetime, date
+from datetime import datetime
 from collections import OrderedDict
 from supabase import create_client, Client
 
@@ -10,78 +10,93 @@ key: str = os.environ.get("SUPABASE_KEY")
 supabase: Client = create_client(url, key)
 
 def fetch_p2p_history():
-    """
-    Obtiene el historial de precios P2P desde la API de p2pvenezuela.com
-    y extrae el primer precio de cada día (el más temprano).
-    """
+    """Obtiene el historial de p2pvenezuela y devuelve {fecha: primer_precio_del_dia}."""
     api_url = "https://www.p2pvenezuela.com/api/p2p/historial/90?pair=VES&t=1777844455169"
     
     print(f"Consultando {api_url} ...")
-    try:
-        resp = requests.get(api_url, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-    except Exception as e:
-        print(f"Error al consultar la API: {e}")
-        return []
-
+    resp = requests.get(api_url, timeout=30)
+    resp.raise_for_status()
+    data = resp.json()
     print(f"Se recibieron {len(data)} registros en total.")
-    
-    # Agrupar por fecha y tomar el primer precio de cada día
-    # Usamos un diccionario ordenado para preservar el orden cronológico
-    daily_first_price = OrderedDict()
-    
+
+    daily_first = OrderedDict()
     for entry in data:
         precio_str = entry.get("precio")
         created_at_str = entry.get("created_at")
-        
         if not precio_str or not created_at_str:
             continue
-        
         try:
-            # Parsear la fecha ISO 8601
             dt = datetime.fromisoformat(created_at_str.replace("Z", "+00:00"))
-            fecha_str = dt.strftime("%Y-%m-%d")
+            fecha = dt.strftime("%Y-%m-%d")
             precio = float(precio_str)
-        except (ValueError, TypeError) as e:
-            print(f"Error parseando entrada {entry}: {e}")
+        except (ValueError, TypeError):
             continue
-        
-        # Si aún no tenemos un precio para esta fecha, lo guardamos
-        if fecha_str not in daily_first_price:
-            daily_first_price[fecha_str] = precio
-    
-    print(f"Se extrajeron precios para {len(daily_first_price)} días distintos.")
-    
-    # Convertir a lista de filas para Supabase
+        if fecha not in daily_first:
+            daily_first[fecha] = precio
+
+    print(f"Primeros precios de {len(daily_first)} días distintos.")
+    return daily_first
+
+def get_existing_bcv(dates):
+    """
+    Recupera la tasa_bcv de los registros que ya existen en Supabase para las fechas dadas.
+    Retorna un dict {fecha: tasa_bcv} (solo para los que tengan valor no nulo).
+    """
+    if not dates:
+        return {}
+    # Consultar en lote: Supabase permite filtrar por lista con 'in'
+    # pero tenemos que hacerlo en paginación o si son muchos días, podemos consultar rango.
+    min_date = min(dates)
+    max_date = max(dates)
+    print(f"Consultando registros existentes entre {min_date} y {max_date}...")
+    resp = supabase.table("exchange_rates") \
+        .select("date, tasa_bcv") \
+        .gte("date", min_date) \
+        .lte("date", max_date) \
+        .execute()
+    existing = {}
+    if resp.data:
+        for row in resp.data:
+            if row["tasa_bcv"] is not None:
+                existing[row["date"]] = row["tasa_bcv"]
+    print(f"Se encontraron {len(existing)} registros con tasa_bcv ya guardada.")
+    return existing
+
+def save_rows(daily_prices):
+    """Inserta/actualiza solo la tasa_binance, respetando la tasa_bcv existente."""
+    if not daily_prices:
+        print("No hay datos para guardar.")
+        return
+
+    fechas = list(daily_prices.keys())
+    existing_bcv = get_existing_bcv(fechas)
+
     rows = []
-    for fecha, precio in daily_first_price.items():
-        rows.append({
+    for fecha, precio in daily_prices.items():
+        row = {
             "date": fecha,
             "tasa_binance": precio,
-            "tasa_bcv": None,           # No tocamos la tasa BCV
             "updated_at": "now()"
-        })
-    
-    return rows
+        }
+        # Si ya existe tasa_bcv, la incluimos para que el upsert NO la borre
+        if fecha in existing_bcv:
+            row["tasa_bcv"] = existing_bcv[fecha]
+        # Si no existe, no incluimos tasa_bcv → Supabase la dejará como null solo si el registro es nuevo,
+        # pero si el registro ya existía y no tenía tasa_bcv, tampoco la borramos.
+        # En cualquier caso, al no incluirla o incluirla solo cuando existe, evitamos sobrescribir con null.
+        rows.append(row)
 
-def save_rows(rows):
-    """Inserta o actualiza en Supabase usando upsert."""
-    if not rows:
-        print("No hay filas para guardar.")
-        return
-    
-    print(f"Insertando/actualizando {len(rows)} filas en Supabase...")
+    print(f"Preparando upsert de {len(rows)} filas...")
     result = supabase.table("exchange_rates").upsert(
         rows,
         on_conflict="date"
     ).execute()
-    
+
     if hasattr(result, 'error') and result.error:
-        print(f"Error de Supabase: {result.error}")
+        print(f"Error: {result.error}")
     else:
-        print("✅ Backfill de Binance completado exitosamente.")
+        print("✅ Backfill de Binance completado sin borrar BCV.")
 
 if __name__ == "__main__":
-    rows = fetch_p2p_history()
-    save_rows(rows)
+    daily_prices = fetch_p2p_history()
+    save_rows(daily_prices)
