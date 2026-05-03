@@ -4,7 +4,12 @@ import requests
 from datetime import date
 from lxml import html  # Usaremos lxml para aprovechar XPath
 from supabase import create_client, Client
+import urllib3
+# Suprimir la advertencia de SSL mientras hacemos scraping al BCV
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+
+        
 # Conexión a Supabase
 url: str = os.environ.get("SUPABASE_URL")
 key: str = os.environ.get("SUPABASE_KEY")  # service_role
@@ -14,9 +19,8 @@ supabase: Client = create_client(url, key)
 def get_bcv_rate():
     """
     Extrae la tasa de cambio oficial del BCV (USD a VES) usando lxml y XPath.
-    Incluye un User-Agent de navegador para evitar bloqueos.
+    Se desactiva la verificación SSL porque el entorno a veces no confía en el certificado del BCV.
     """
-    # Headers mejorados para simular un navegador real
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
@@ -24,28 +28,21 @@ def get_bcv_rate():
     }
     
     try:
-        # 1. Obtener el HTML de la página principal
-        response = requests.get("https://www.bcv.org.ve/", headers=headers, timeout=20)
-        response.raise_for_status()  # Verifica si hubo errores HTTP
+        # --- CAMBIO CLAVE ---
+        # Añadimos verify=False para ignorar la validación del certificado SSL del BCV
+        response = requests.get("https://www.bcv.org.ve/", headers=headers, timeout=20, verify=False)
+        response.raise_for_status()
 
-        # 2. Parsear el contenido con lxml
         tree = html.fromstring(response.content)
         
-        # 3. Aplicar el XPath exacto que proporcionaste
-        # Busca el elemento <strong> que contiene la tasa
         elemento_tasa = tree.xpath('/html/body/div[4]/div/div[2]/div/div[1]/div[1]/section[1]/div/div[2]/div/div[7]/div/div/div[2]/strong')
         
-        # 4. Validar y limpiar el resultado
         if elemento_tasa:
-            # Extraemos el texto, por ejemplo: " 36,45 Bs."
             texto_bruto = elemento_tasa[0].text_content().strip()
             print(f"BCV - Texto encontrado con XPath: '{texto_bruto}'")
             
-            # Limpieza del número: buscamos una secuencia como "36,45"
-            # Usamos una expresión regular que captura números y comas
             busca_numero = re.search(r'(\d+,\d+)', texto_bruto)
             if busca_numero:
-                # Convertimos a formato numérico: "36,45" -> 36.45
                 tasa_str = busca_numero.group(1).replace(',', '.')
                 tasa_float = float(tasa_str)
                 print(f"BCV - Tasa extraída con éxito: {tasa_float}")
@@ -54,7 +51,7 @@ def get_bcv_rate():
                 print(f"BCV - ERROR: No se encontró un número válido en el texto '{texto_bruto}'")
                 return None
         else:
-            print("BCV - ERROR: El XPath no encontró ningún elemento. ¿Habrá cambiado la estructura otra vez?")
+            print("BCV - ERROR: El XPath no encontró ningún elemento.")
             return None
 
     except requests.exceptions.RequestException as e:
